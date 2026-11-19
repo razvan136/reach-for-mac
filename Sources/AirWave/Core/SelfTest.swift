@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Vision
 
@@ -24,6 +25,7 @@ enum SelfTest {
         testPinchEvidence()
         testPinchAimLock()
         testPinchActions()
+        testTwoHandZoom()
         testDragRelease()
         testTrackingContinuity()
         testSustainedDrag()
@@ -31,6 +33,7 @@ enum SelfTest {
         testStandardPinch()
         testFrameBatch()
         testMouseEvents()
+        testMagnificationEvents()
         testScrollPose()
         testScrollMotion()
         testMissionControlSwipe()
@@ -235,6 +238,68 @@ enum SelfTest {
               buttons.allSatisfy { distance($0.location, target) < 0.01 })
     }
 
+    private static func testTwoHandZoom() {
+        func grip(x: CGFloat, angle: CGFloat, gap: CGFloat = 0) -> HandFrame {
+            var hand = Fixture.pinching(gap: gap)
+            let center = interpolate(hand.thumbTip!, hand.indexTip!, 0.5)
+            for (joint, point) in hand.points {
+                let dx = point.x - center.x
+                let dy = point.y - center.y
+                hand.points[joint] = CGPoint(x: x + cos(angle) * dx - sin(angle) * dy,
+                                             y: 0.43 + sin(angle) * dx + cos(angle) * dy)
+            }
+            return hand
+        }
+
+        let left = grip(x: 0.49, angle: 0.72)
+        let right = grip(x: 0.51, angle: -0.72)
+        let leftOpen = grip(x: 0.37, angle: 0.72, gap: 0.9)
+        let rightOpen = grip(x: 0.63, angle: -0.72, gap: 0.9)
+        var zoom = TwoHandZoom()
+        check("one pinch and an open hand remain available to single-hand actions",
+              zoom.update(left, rightOpen, at: 0) == .idle)
+        check("duplicated observations of a single hand cannot start zoom",
+              zoom.update(left, left, at: 0.025) == .idle)
+        check("a candidate pair suppresses one-hand actions before zoom begins",
+              zoom.update(left, right, at: 0.05) == .captured && zoom.isCaptured)
+        let begin = zoom.update(left, right, at: 0.083)
+        check("a confirmed pair can begin with the two pinches nearly touching",
+              begin == .began(CGPoint(x: 0.5, y: 0.43)))
+
+        var outward = 0.0
+        for index in 1...9 {
+            let offset = Double(index) * 0.02
+            let handLeft = grip(x: 0.49 - offset, angle: 0.72)
+            let handRight = grip(x: 0.51 + offset, angle: -0.72)
+            // Vision may return the two observations in a different order.
+            if case .changed(let value) = zoom.update(handRight, handLeft, at: 0.083 + Double(index) / 30) {
+                outward += value
+            }
+        }
+        check("spreading the pinches progressively zooms in", outward > 0.3)
+
+        var inward = 0.0
+        var seconds = 0.383
+        for index in 1...15 {
+            seconds += 1.0 / 30
+            let offset = max(0, 0.18 - Double(index) * 0.018)
+            if case .changed(let value) = zoom.update(grip(x: 0.49 - offset, angle: 0.72),
+                                                     grip(x: 0.51 + offset, angle: -0.72), at: seconds) {
+                inward += value
+            }
+        }
+        check("bringing the same pinches together reverses zoom", inward < -0.25)
+        check("a brief occlusion holds the current zoom", zoom.update(left, nil, at: seconds + 0.035) == .captured)
+        check("a returning hand does not deliver a large catch-up zoom",
+              zoom.update(left, right, at: seconds + 0.13) == .captured)
+        check("opening either pinch ends magnification immediately",
+              zoom.update(leftOpen, right, at: seconds + 0.16) == .ended)
+        check("the remaining pinch is suppressed until it opens",
+              zoom.update(leftOpen, right, at: seconds + 0.20) == .captured)
+        check("opening both hands restores single-hand control",
+              zoom.update(leftOpen, rightOpen, at: seconds + 0.23) == .released && !zoom.isCaptured)
+    }
+
     private static func testPinchActions() {
         var pinch = PinchInteraction()
         check("a pinch starts without pressing the mouse button",
@@ -429,6 +494,27 @@ enum SelfTest {
         check("drag reports movement and releases once at the last position",
               sent.map(\.type) == [.mouseMoved, .leftMouseDown, .leftMouseDragged, .leftMouseUp] &&
               sent.last?.location == destination)
+    }
+
+    private static func testMagnificationEvents() {
+        var events: [CGEvent] = []
+        let input = SystemInput { events.append($0) }
+        let point = CGPoint(x: 160, y: 130)
+        input.beginZoom(at: point)
+        input.click(at: point)
+        input.beginDrag(at: point)
+        input.zoom(by: 0.10)
+        input.zoom(by: -0.07)
+        input.reset()
+        input.endZoom()
+        let native = events.compactMap { NSEvent(cgEvent: $0) }.filter { $0.type == .magnify }
+        check("zoom sends one native begin, two changes, and one end",
+              native.map(\.phase) == [.began, .changed, .changed, .ended])
+        check("zoom events carry signed magnification amounts",
+              native.count == 4 && near(native[1].magnification, 0.10, 0.0001) &&
+              near(native[2].magnification, -0.07, 0.0001))
+        check("active magnification sends no mouse-button events",
+              !events.contains { $0.type == .leftMouseDown || $0.type == .leftMouseUp })
     }
 
     private static func testFrameBatch() {

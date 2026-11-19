@@ -11,6 +11,9 @@ enum PointerFeedback: String {
     case scrollingUp = "Scroll up"
     case scrollingDown = "Scroll down"
     case missionControl = "Mission Control"
+    case zoom = "Zoom"
+    case zoomingIn = "Zoom in"
+    case zoomingOut = "Zoom out"
     case idle = "Idle"
     case tracking = "Finding hand"
     case permission = "Allow Accessibility"
@@ -29,7 +32,8 @@ enum PointerFeedback: String {
         case .pinching, .permission: return .systemYellow
         case .clicked, .dropped: return .systemGreen
         case .dragging: return .systemOrange
-        case .scrolling, .scrollingUp, .scrollingDown, .missionControl: return .systemPurple
+        case .scrolling, .scrollingUp, .scrollingDown, .missionControl, .zoom, .zoomingIn, .zoomingOut:
+            return .systemPurple
         case .idle, .tracking: return .lightGray
         }
     }

@@ -52,6 +52,7 @@ calibrating. Reach saves calibration separately for each camera and aiming mode.
 | Hold your thumb and index finger together | Start a drag after about 320 ms. Open your fingers to drop. |
 | Hold up a peace sign and move it up or down | Scroll while your hand is offset from its starting height. Return to that height or open your hand to stop. |
 | Hold up four fingers, fold your thumb across your palm, and swipe sideways | Open Mission Control. Choose the window or Space you want. |
+| Pinch thumb to index finger on both hands | Spread your pinches to zoom in or bring them together to zoom out. Release a pinch to stop. Aim at a view that supports trackpad pinch-to-zoom. |
 
 Open **Settings** to aim with your palm, adjust cursor, drag, and scroll speeds,
 or increase **Smoothing** for a steadier pointer. Select the number beside a

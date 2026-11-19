@@ -5,21 +5,31 @@ import Vision
 /// Runs Vision hand-pose detection and returns a normalized `HandFrame`.
 final class HandPoseDetector {
     private let request = VNDetectHumanHandPoseRequest()
+    private var previousWrist: CGPoint?
 
     init() {
-        request.maximumHandCount = 1
+        request.maximumHandCount = 2
     }
 
-    func detect(in pixelBuffer: CVPixelBuffer) -> HandFrame? {
+    func resetTracking() {
+        previousWrist = nil
+    }
+
+    func detect(in pixelBuffer: CVPixelBuffer) -> [HandFrame] {
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
         do {
             try handler.perform([request])
         } catch {
-            return nil
+            return []
         }
-        guard let observation = request.results?.first else { return nil }
         let aspect = CGFloat(CVPixelBufferGetWidth(pixelBuffer)) / CGFloat(CVPixelBufferGetHeight(pixelBuffer))
-        return Self.frame(from: observation, aspectRatio: aspect)
+        var hands = (request.results ?? []).compactMap { Self.frame(from: $0, aspectRatio: aspect) }
+        if hands.count == 2, let previousWrist, let first = hands[0].wrist, let second = hands[1].wrist,
+           distance(previousWrist, second) < distance(previousWrist, first) {
+            hands.swapAt(0, 1)
+        }
+        previousWrist = hands.first?.wrist ?? previousWrist
+        return hands
     }
 
     static func frame(from observation: VNHumanHandPoseObservation,

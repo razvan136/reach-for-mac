@@ -7,6 +7,7 @@ final class SystemInput {
     private var position: CGPoint?
     private var dragging = false
     private var eventNumber: Int64 = 0
+    private var zoomPoint: CGPoint?
 
     init(deliver: @escaping (CGEvent) -> Void = { $0.post(tap: .cghidEventTap) }) {
         self.deliver = deliver
@@ -24,7 +25,7 @@ final class SystemInput {
     }
 
     func click(at point: CGPoint) {
-        guard !dragging else { return }
+        guard !dragging, zoomPoint == nil else { return }
         eventNumber += 1
         guard let down = button(.leftMouseDown, at: point),
               let up = button(.leftMouseUp, at: point) else { return }
@@ -34,7 +35,7 @@ final class SystemInput {
     }
 
     func beginDrag(at point: CGPoint) {
-        guard !dragging else { return }
+        guard !dragging, zoomPoint == nil else { return }
         eventNumber += 1
         guard let down = button(.leftMouseDown, at: point) else { return }
         moveSystemPointer(to: point)
@@ -50,6 +51,7 @@ final class SystemInput {
     }
 
     func reset() {
+        endZoom()
         endDrag()
         position = nil
     }
@@ -61,6 +63,26 @@ final class SystemInput {
                                   wheelCount: 1, wheel1: pixels, wheel2: 0, wheel3: 0) else { return }
         event.location = point
         deliver(event)
+    }
+
+    func beginZoom(at point: CGPoint) {
+        guard !dragging, zoomPoint == nil,
+              let event = MagnificationEvent.make(.began, amount: 0, at: point, source: pointerSource) else { return }
+        move(to: point)
+        zoomPoint = point
+        deliver(event)
+    }
+
+    func zoom(by amount: Double) {
+        guard let point = zoomPoint,
+              let event = MagnificationEvent.make(.changed, amount: amount, at: point, source: pointerSource) else { return }
+        deliver(event)
+    }
+
+    func endZoom() {
+        guard let point = zoomPoint else { return }
+        zoomPoint = nil
+        if let event = MagnificationEvent.make(.ended, amount: 0, at: point, source: pointerSource) { deliver(event) }
     }
 
     private func moveSystemPointer(to point: CGPoint) {

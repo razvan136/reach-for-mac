@@ -5,7 +5,14 @@ import Foundation
 struct HandFrameBatch {
     struct Frame {
         let hand: HandFrame?
+        let secondHand: HandFrame?
         let time: TimeInterval
+
+        init(hand: HandFrame?, secondHand: HandFrame? = nil, time: TimeInterval) {
+            self.hand = hand
+            self.secondHand = secondHand
+            self.time = time
+        }
     }
 
     static let maxAge: TimeInterval = 0.20

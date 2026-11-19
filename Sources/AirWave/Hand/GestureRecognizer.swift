@@ -2,7 +2,7 @@ import CoreGraphics
 import Vision
 
 enum HandGesture: Equatable {
-    case none, aim, pinch, scroll, missionControl
+    case none, aim, pinch, scroll, missionControl, zoom
 
     var label: String {
         switch self {
@@ -11,6 +11,7 @@ enum HandGesture: Equatable {
         case .pinch: return "Pinch"
         case .scroll: return "Peace sign"
         case .missionControl: return "Four fingers"
+        case .zoom: return "Two-hand zoom"
         }
     }
 
@@ -21,6 +22,7 @@ enum HandGesture: Equatable {
         case .pinch: return "Release to click or hold to drag"
         case .scroll: return "Move up or down from where you started the pose"
         case .missionControl: return "Swipe sideways to open Mission Control"
+        case .zoom: return "Move the pinches apart or together"
         }
     }
 }

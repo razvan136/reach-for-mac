@@ -42,6 +42,7 @@ final class HandControlEngine: ObservableObject {
     private let settings = Settings.shared
     private let camera = CameraSession()
     private let detector = HandPoseDetector()
+    private var detectorGeneration: Int?
     private let captureState = OSAllocatedUnfairLock(initialState: CaptureState())
     private let previewQueue = DispatchQueue(label: "com.razgogo.airwave.preview", qos: .utility)
     private lazy var ciContext = CIContext()
@@ -70,6 +71,7 @@ final class HandControlEngine: ObservableObject {
     private var pointerActive = false
     private var actionFeedback: (label: PointerFeedback, until: TimeInterval)?
     private var pinch = PinchInteraction()
+    private var twoHandZoom = TwoHandZoom()
     private var pinchPoint = CGPoint.zero
     private var scrollMotion = ScrollMotion()
     private var missionControlSwipe = MissionControlSwipe()
@@ -229,7 +231,12 @@ final class HandControlEngine: ObservableObject {
         let time = CACurrentMediaTime()
         guard acceptsFrames, HandFrameBatch.isFresh(capturedAt, at: time) else { return }
 
-        let result = HandFrameBatch.Frame(hand: detector.detect(in: buffer), time: capturedAt)
+        if detectorGeneration != generation {
+            detector.resetTracking()
+            detectorGeneration = generation
+        }
+        let hands = detector.detect(in: buffer)
+        let result = HandFrameBatch.Frame(hand: hands.first, secondHand: hands.dropFirst().first, time: capturedAt)
         publish(generation: generation, frame: result)
 
         guard showsPreview, time - lastPreviewAt >= 1.0 / 15.0 else { return }
@@ -303,6 +310,7 @@ final class HandControlEngine: ObservableObject {
 
     private func process(_ frame: HandFrameBatch.Frame) {
         expireTracking(at: frame.time)
+        if settings.enabled, accessibilityGranted, !isCalibrating, !isDragging, handleZoom(frame) { return }
         guard let hand = frame.hand else {
             recognizer.missedFrame()
             pauseGestureTracking()
@@ -326,6 +334,51 @@ final class HandControlEngine: ObservableObject {
         }
         guard settings.enabled else { return }
         apply(sample, at: frame.time)
+    }
+
+    private func handleZoom(_ frame: HandFrameBatch.Frame) -> Bool {
+        let update = twoHandZoom.update(frame.hand, frame.secondHand, at: frame.time)
+        switch update {
+        case .idle:
+            return false
+        case .released:
+            if let position = motion.position { resumeAiming(at: position) }
+            return false
+        default:
+            break
+        }
+
+        if gesture != .zoom {
+            pinch.cancel()
+            pinchAim = PinchAimLock()
+            recognizer.reset(requiringPinchRelease: true)
+            scrollMotion = ScrollMotion()
+            missionControlSwipe = MissionControlSwipe()
+            motion.freeze()
+            actionFeedback = nil
+            gesture = .zoom
+        }
+        if frame.hand != nil {
+            continuity.confirmed(at: frame.time)
+            if !handVisible { handVisible = true }
+        }
+
+        switch update {
+        case .began(let midpoint):
+            if placePointerIfNeeded(at: midpoint, time: frame.time), let position = motion.position {
+                mouse.beginZoom(at: pointerLocation(position))
+            }
+        case .changed(let amount):
+            mouse.zoom(by: amount)
+            flash(amount > 0 ? .zoomingIn : .zoomingOut, at: frame.time)
+        case .ended:
+            mouse.endZoom()
+            actionFeedback = nil
+        case .idle, .captured, .released:
+            break
+        }
+        renderPointer()
+        return true
     }
 
     private func tick() {
@@ -475,6 +528,8 @@ final class HandControlEngine: ObservableObject {
             }
         case .none:
             motion.freeze()
+        case .zoom:
+            break
         }
     }
 
@@ -551,6 +606,7 @@ final class HandControlEngine: ObservableObject {
             case .pinch: feedback = .pinching
             case .scroll: feedback = settings.scrollEnabled ? .scrolling : .idle
             case .missionControl: feedback = .missionControl
+            case .zoom: feedback = .zoom
             case .none: feedback = .idle
             }
         }
@@ -558,9 +614,10 @@ final class HandControlEngine: ObservableObject {
     }
 
     private func resetInteraction() {
-        let interruptedPinch = pinch.isActive
+        let interruptedPinch = pinch.isActive || twoHandZoom.isCaptured
         mouse.reset()
         pinch.cancel()
+        twoHandZoom = TwoHandZoom()
         stillness = PointerStillness()
         indexAnchor = IndexAnchor()
         pinchAim = PinchAimLock()

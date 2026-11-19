@@ -83,6 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         gestures.addItem(legend("Firm pinch · Hold to drag, open to drop"))
         gestures.addItem(legend("Peace sign · Move up or down to scroll, return to the starting height to stop"))
         gestures.addItem(legend("Four fingers, thumb folded · Swipe sideways to open Mission Control"))
+        gestures.addItem(legend("Pinch with both hands · Spread to zoom in, close together to zoom out"))
         guide.submenu = gestures
         menu.addItem(guide)
 
