@@ -11,7 +11,10 @@ enum PointerFeedback: String {
     case scrollingUp = "Scroll up"
     case scrollingDown = "Scroll down"
     case missionControl = "Mission Control"
-    case zoom = "Zoom"
+    case confirmingZoom = "Pinch both hands"
+    case zoom = "Move hands to zoom"
+    case trackingZoom = "Finding both hands"
+    case releasingZoom = "Open both hands"
     case zoomingIn = "Zoom in"
     case zoomingOut = "Zoom out"
     case idle = "Idle"
@@ -32,7 +35,8 @@ enum PointerFeedback: String {
         case .pinching, .permission: return .systemYellow
         case .clicked, .dropped: return .systemGreen
         case .dragging: return .systemOrange
-        case .scrolling, .scrollingUp, .scrollingDown, .missionControl, .zoom, .zoomingIn, .zoomingOut:
+        case .scrolling, .scrollingUp, .scrollingDown, .missionControl,
+             .confirmingZoom, .zoom, .trackingZoom, .releasingZoom, .zoomingIn, .zoomingOut:
             return .systemPurple
         case .idle, .tracking: return .lightGray
         }
@@ -43,7 +47,11 @@ enum PointerFeedback: String {
 final class PointerOverlay {
     private let panel: NSPanel
     private let view: PointerView
-    private let footprint = CGSize(width: 166, height: 30)
+    private let footprint = CGSize(width: 178, height: 60)
+    private static let ringInset: CGFloat = 15
+    private static let ringRadius: CGFloat = 11
+    // macOS positions the arrow at its tip, above and left of the visible body.
+    private static let centerFromArrowTip = CGPoint(x: 5.5, y: -7.5)
 
     init() {
         let bounds = CGRect(origin: .zero, size: footprint)
@@ -63,12 +71,13 @@ final class PointerOverlay {
     }
 
     func show(at point: CGPoint, in display: CGRect, screenFrame: CGRect, feedback: PointerFeedback) {
-        let left = point.x > display.maxX - footprint.width + 15
-        let x = point.x - display.minX + screenFrame.minX
-        let y = screenFrame.maxY - (point.y - display.minY)
-        let localX: CGFloat = left ? footprint.width - 15 : 15
-        let origin = CGPoint(x: x - localX, y: y - 15)
-        view.update(labelOnLeft: left, feedback: feedback)
+        let x = point.x - display.minX + screenFrame.minX + Self.centerFromArrowTip.x
+        let y = screenFrame.maxY - (point.y - display.minY) + Self.centerFromArrowTip.y
+        let left = x + footprint.width - Self.ringInset > screenFrame.maxX
+        let localX = left ? footprint.width - Self.ringInset : Self.ringInset
+        let origin = CGPoint(x: x - localX, y: y - footprint.height / 2)
+        let labelCenter = min(max(y, screenFrame.minY + 12), screenFrame.maxY - 12)
+        view.update(labelOnLeft: left, labelOffset: labelCenter - y, feedback: feedback)
         if panel.frame.origin != origin { panel.setFrameOrigin(origin) }
         if !panel.isVisible { panel.orderFrontRegardless() }
     }
@@ -79,23 +88,28 @@ final class PointerOverlay {
 
     private final class PointerView: NSView {
         private var labelOnLeft = false
+        private var labelOffset: CGFloat = 0
         private var feedback: PointerFeedback = .idle
 
-        func update(labelOnLeft: Bool, feedback: PointerFeedback) {
-            guard self.labelOnLeft != labelOnLeft || self.feedback != feedback else { return }
+        func update(labelOnLeft: Bool, labelOffset: CGFloat, feedback: PointerFeedback) {
+            guard self.labelOnLeft != labelOnLeft || self.labelOffset != labelOffset ||
+                    self.feedback != feedback else { return }
             self.labelOnLeft = labelOnLeft
+            self.labelOffset = labelOffset
             self.feedback = feedback
             needsDisplay = true
         }
 
         override func draw(_ dirtyRect: NSRect) {
-            let x = labelOnLeft ? bounds.maxX - 15 : 15
-            let ring = NSBezierPath(ovalIn: CGRect(x: x - 8, y: 7, width: 16, height: 16))
-            NSColor.black.withAlphaComponent(0.85).setStroke()
-            ring.lineWidth = 5
+            let x = labelOnLeft ? bounds.maxX - ringInset : ringInset
+            let radius = ringRadius
+            let ring = NSBezierPath(ovalIn: CGRect(x: x - radius, y: bounds.midY - radius,
+                                                   width: 2 * radius, height: 2 * radius))
+            NSColor.black.withAlphaComponent(0.78).setStroke()
+            ring.lineWidth = 3.6
             ring.stroke()
             feedback.color.setStroke()
-            ring.lineWidth = 2.5
+            ring.lineWidth = 1.8
             ring.stroke()
 
             guard let badgeText = feedback.badge else { return }
@@ -105,8 +119,8 @@ final class PointerOverlay {
             ])
             let textSize = label.size()
             let width = ceil(textSize.width) + 16
-            let badge = CGRect(x: labelOnLeft ? x - 15 - width : x + 15,
-                               y: 4, width: width, height: 22)
+            let badge = CGRect(x: labelOnLeft ? x - 17 - width : x + 17,
+                               y: bounds.midY + labelOffset - 11, width: width, height: 22)
             NSColor(srgbRed: 0.07, green: 0.10, blue: 0.14, alpha: 0.94).setFill()
             let background = NSBezierPath(roundedRect: badge, xRadius: 9, yRadius: 9)
             background.fill()

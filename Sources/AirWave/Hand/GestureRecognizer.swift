@@ -19,9 +19,9 @@ enum HandGesture: Equatable {
         switch self {
         case .none: return "Open your hand or point to move"
         case .aim: return "Move the pointer"
-        case .pinch: return "Release to click or hold to drag"
+        case .pinch: return "Release to click or keep pinching and move to drag"
         case .scroll: return "Move up or down from where you started the pose"
-        case .missionControl: return "Swipe sideways to open Mission Control"
+        case .missionControl: return "Swipe down to open Mission Control"
         case .zoom: return "Move the pinches apart or together"
         }
     }
@@ -48,7 +48,8 @@ final class GestureRecognizer {
     private var sawOpenPinch = false
     private var missionControlGraceFrames = 0
 
-    var isConfirmingPinch: Bool { candidate == .pinch && stable != .pinch }
+    private(set) var pendingPinch: GestureSample?
+    var isConfirmingPinch: Bool { pendingPinch != nil }
     var isConfirmingMissionControl: Bool { candidate == .missionControl && stable != .missionControl }
 
     func reset(requiringPinchRelease: Bool = false) {
@@ -62,9 +63,11 @@ final class GestureRecognizer {
     func missedFrame() {
         candidate = .none
         sawOpenPinch = false
+        pendingPinch = nil
     }
 
     func processed(_ frame: HandFrame, dragging: Bool = false) -> GestureSample? {
+        pendingPinch = nil
         guard let palm = palmAnchor.measure(frame) else {
             missedFrame()
             return nil
@@ -92,6 +95,10 @@ final class GestureRecognizer {
             if confirmed || raw == .aim && stable == .none {
                 stable = raw
             } else {
+                if raw == .pinch {
+                    pendingPinch = GestureSample(gesture: .pinch, palmCenter: palm.center,
+                                                 indexTip: frame.aimTip, isFirmPinch: pinch?.isFirm == true)
+                }
                 return nil
             }
         } else {
@@ -205,7 +212,7 @@ final class GestureRecognizer {
             missionControlGraceFrames = 3
             return true
         }
-        // Once confirmed, tolerate a brief occlusion while the hand moves sideways.
+        // Once confirmed, tolerate a brief occlusion while the hand moves.
         if stable == .missionControl, raised >= 3, !fingers.contains(.curled), folded != false,
            missionControlGraceFrames > 0 {
             missionControlGraceFrames -= 1

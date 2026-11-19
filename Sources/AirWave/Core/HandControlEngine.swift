@@ -72,7 +72,9 @@ final class HandControlEngine: ObservableObject {
     private var actionFeedback: (label: PointerFeedback, until: TimeInterval)?
     private var pinch = PinchInteraction()
     private var twoHandZoom = TwoHandZoom()
-    private var pinchPoint = CGPoint.zero
+    private var zoomFeedback = PointerFeedback.zoom
+    private var lastAim: PinchTracking.Aim?
+    private var pinchTracking: PinchTracking?
     private var scrollMotion = ScrollMotion()
     private var missionControlSwipe = MissionControlSwipe()
     private let missionControl = MissionControl()
@@ -318,6 +320,9 @@ final class HandControlEngine: ObservableObject {
         }
         continuity.sawHand(at: frame.time)
         guard let sample = recognizer.processed(hand, dragging: isDragging) else {
+            if settings.enabled, accessibilityGranted, !isCalibrating, let candidate = recognizer.pendingPinch {
+                _ = latchPinch(candidate, at: frame.time)
+            }
             pauseGestureTracking()
             return
         }
@@ -350,6 +355,8 @@ final class HandControlEngine: ObservableObject {
 
         if gesture != .zoom {
             pinch.cancel()
+            pinchTracking = nil
+            lastAim = nil
             pinchAim = PinchAimLock()
             recognizer.reset(requiringPinchRelease: true)
             scrollMotion = ScrollMotion()
@@ -364,17 +371,29 @@ final class HandControlEngine: ObservableObject {
         }
 
         switch update {
+        case .confirming:
+            zoomFeedback = .confirmingZoom
         case .began(let midpoint):
+            zoomFeedback = .zoom
             if placePointerIfNeeded(at: midpoint, time: frame.time), let position = motion.position {
                 mouse.beginZoom(at: pointerLocation(position))
             }
+        case .ready:
+            zoomFeedback = .zoom
         case .changed(let amount):
+            zoomFeedback = .zoom
             mouse.zoom(by: amount)
             flash(amount > 0 ? .zoomingIn : .zoomingOut, at: frame.time)
+        case .paused:
+            zoomFeedback = .trackingZoom
+            actionFeedback = nil
         case .ended:
             mouse.endZoom()
+            zoomFeedback = .releasingZoom
             actionFeedback = nil
-        case .idle, .captured, .released:
+        case .releasing:
+            zoomFeedback = .releasingZoom
+        case .idle, .released:
             break
         }
         renderPointer()
@@ -431,6 +450,10 @@ final class HandControlEngine: ObservableObject {
     private func pauseGestureTracking() {
         pinch.pauseHold()
         scrollMotion.pause()
+        if !pinch.isActive, !recognizer.isConfirmingPinch, pinchTracking?.contact != nil {
+            pinchTracking = nil
+            if let position = motion.position { resumeAiming(at: position) }
+        }
         if isDragging || recognizer.isConfirmingPinch || recognizer.isConfirmingMissionControl {
             motion.freeze()
         }
@@ -442,23 +465,12 @@ final class HandControlEngine: ObservableObject {
         defer { renderPointer() }
         if sample.gesture != .aim { pinchAim = PinchAimLock() }
         if pinch.isActive, sample.gesture != .pinch {
-            motion.freeze()
-            switch pinch.release() {
-            case .click:
-                mouse.click(at: pinchPoint)
-                flash(.clicked, at: time)
-                resumeAiming(at: pinchPoint)
-            case .endDrag:
-                let drop = pointerLocation(motion.position ?? pinchPoint)
-                mouse.move(to: drop)
-                mouse.endDrag()
-                flash(.dropped, at: time)
-                resumeAiming(at: drop)
-            case nil:
-                break
-            }
-            if isDragging { isDragging = false }
+            finishPinch(palm: sample.palmCenter, at: time)
             return
+        }
+        if sample.gesture != .aim && sample.gesture != .pinch {
+            lastAim = nil
+            pinchTracking = nil
         }
 
         if sample.gesture != .aim && !isDragging { stillness = PointerStillness() }
@@ -474,40 +486,28 @@ final class HandControlEngine: ObservableObject {
 
         let aimsWithIndex = settings.aimPoint == .indexFinger
         if aimsWithIndex, sample.gesture == .aim, pinchAim.shouldHold(sample.pinchAimEvidence, at: time) {
-            motion.freeze()
+            followPinchApproach(sample, at: time)
             return
         }
-        let aim = !aimsWithIndex ? sample.palmCenter :
-            indexAnchor.measure(tip: sample.indexTip, palm: sample.palmCenter, at: time)
+        let aim = sample.gesture == .pinch ? nil : (aimsWithIndex
+            ? indexAnchor.measure(tip: sample.indexTip, palm: sample.palmCenter, at: time)
+            : sample.palmCenter)
         switch sample.gesture {
         case .aim:
             guard let aim else { motion.freeze(); return }
+            if pinchTracking != nil {
+                pinchTracking = nil
+                if let position = motion.position { resumeAiming(at: position) }
+            }
             if cursor.needsHandReference {
                 guard settings.aimPoint == .palm || sample.indexTip != nil else { return }
                 mapper.resetFilters()
             }
+            lastAim = PinchTracking.Aim(point: aim, palm: sample.palmCenter, time: time)
             let raw = mapped(aim, at: time)
             aimPointer(at: cursor.update(raw: raw), capturedAt: time)
         case .pinch:
-            guard accessibilityGranted, let aim else { motion.freeze(); return }
-            if !pinch.isActive {
-                let position = motion.position ?? mapped(aim, at: time)
-                pinchPoint = pointerLocation(position)
-                motion.place(at: pinchPoint)
-                pointerActive = true
-                actionFeedback = nil
-            }
-            switch pinch.update(at: time, firmlyClosed: sample.isFirmPinch) {
-            case .waiting: break
-            case .beginDrag:
-                mapper.resetFilters()
-                cursor.beginDrag(at: pinchPoint, hand: mapped(aim, at: time), within: display)
-                mouse.beginDrag(at: pinchPoint)
-                isDragging = true
-            case .drag:
-                let raw = mapped(aim, at: time)
-                aimPointer(at: cursor.update(raw: raw, gain: settings.pinchPrecision), capturedAt: time)
-            }
+            updatePinch(sample, at: time)
         case .scroll:
             motion.freeze()
             guard accessibilityGranted, settings.scrollEnabled else { return }
@@ -523,12 +523,121 @@ final class HandControlEngine: ObservableObject {
             motion.freeze()
             guard accessibilityGranted, placePointerIfNeeded(at: aim, time: time) else { return }
             if !missionControlSwipe.isActive { actionFeedback = nil }
-            if missionControlSwipe.update(sample.palmCenter, at: time, reach: settings.calibration.width) {
+            if missionControlSwipe.update(sample.palmCenter, at: time, reach: settings.calibration.height) {
                 missionControl.open()
             }
         case .none:
             motion.freeze()
         case .zoom:
+            break
+        }
+    }
+
+    private func preparePinch(_ sample: GestureSample, at time: TimeInterval) -> PinchTracking? {
+        if let pinchTracking { return pinchTracking }
+        let reference: PinchTracking.Aim
+        if let lastAim, time - lastAim.time <= 0.18 {
+            reference = lastAim
+        } else {
+            guard let aim = settings.aimPoint == .palm ? sample.palmCenter : sample.indexTip else { return nil }
+            reference = PinchTracking.Aim(point: aim, palm: sample.palmCenter, time: time)
+        }
+        let hand = projected(reference.point)
+        let approach = PinchTracking.Reference(pointer: motion.position ?? hand, hand: hand)
+        let tracking = PinchTracking(aim: reference, approach: approach)
+        pinchTracking = tracking
+        return tracking
+    }
+
+    private func followPinchApproach(_ sample: GestureSample, at time: TimeInterval) {
+        guard let tracking = preparePinch(sample, at: time), tracking.contact == nil else {
+            motion.freeze()
+            return
+        }
+        let hand = projected(tracking.aim(following: sample.palmCenter))
+        let target = tracking.approach.position(following: hand)
+        if target == motion.position {
+            motion.freeze()
+        } else {
+            aimPointer(at: target, capturedAt: time)
+        }
+    }
+
+    private func latchPinch(_ sample: GestureSample, at time: TimeInterval) -> PinchTracking? {
+        guard var tracking = preparePinch(sample, at: time) else { return nil }
+        if tracking.contact == nil {
+            // Latch the point visible when touch is first observed. A second
+            // contact frame is still required before any click or drag is eligible.
+            let aim = tracking.aim(following: sample.palmCenter)
+            let hand = projected(aim)
+            let point = pointerLocation(motion.position ?? hand)
+            tracking.contact = PinchTracking.Reference(pointer: point, hand: hand)
+            pinchTracking = tracking
+            mapper.resetFilters()
+            _ = mapped(aim, at: time)
+            motion.place(at: point)
+            pointerActive = true
+            actionFeedback = nil
+        }
+        return tracking
+    }
+
+    private func updatePinch(_ sample: GestureSample, at time: TimeInterval) {
+        guard accessibilityGranted, let tracking = latchPinch(sample, at: time),
+              let contact = tracking.contact else { motion.freeze(); return }
+        let aim = tracking.aim(following: sample.palmCenter)
+        let hand = mapped(aim, at: time)
+        let update = pinch.update(at: time, firmlyClosed: sample.isFirmPinch,
+                                  handPoint: isDragging ? nil : projected(aim))
+        switch update {
+        case .waiting:
+            break
+        case .beginDrag:
+            cursor.beginDrag(at: contact.pointer, hand: contact.hand, within: display)
+            mouse.beginDrag(at: contact.pointer)
+            isDragging = true
+            let target = bounded(cursor.update(raw: hand, gain: settings.pinchPrecision))
+            let travel = distance(contact.pointer, target)
+            // Send the first part immediately even when contact and opening
+            // frames arrive in one batch. The display link eases the remainder.
+            if travel > 0 {
+                motion.place(at: interpolate(contact.pointer, target, min(1, 12 / travel)))
+            }
+            aimPointer(at: target, capturedAt: time)
+        case .drag:
+            aimPointer(at: cursor.update(raw: hand, gain: settings.pinchPrecision), capturedAt: time)
+        }
+    }
+
+    private func finishPinch(palm: CGPoint, at time: TimeInterval) {
+        motion.freeze()
+        let tracking = pinchTracking
+        pinchTracking = nil
+        defer { if isDragging { isDragging = false } }
+
+        switch pinch.release() {
+        case .click:
+            guard let tracking, let contact = tracking.contact else { return }
+            mouse.click(at: contact.pointer)
+            flash(.clicked, at: time)
+            resumeAiming(at: contact.pointer)
+            let hand = projected(tracking.aim(following: palm))
+            let next = bounded(contact.continuation(afterClickAt: hand))
+            if next != contact.pointer {
+                cursor.resumeAiming(from: next, within: display)
+                aimPointer(at: next, capturedAt: time)
+            }
+        case .endDrag:
+            if let position = motion.position {
+                let drop = pointerLocation(position)
+                mouse.move(to: drop)
+                mouse.endDrag()
+                flash(.dropped, at: time)
+                resumeAiming(at: drop)
+            } else {
+                mouse.endDrag()
+            }
+        case nil:
             break
         }
     }
@@ -549,6 +658,10 @@ final class HandControlEngine: ObservableObject {
 
     private func mapped(_ palm: CGPoint, at time: TimeInterval) -> CGPoint {
         bounded(mapper.map(palm, onto: display, timestamp: time, speed: settings.speed))
+    }
+
+    private func projected(_ point: CGPoint) -> CGPoint {
+        bounded(mapper.project(point, onto: display, speed: settings.speed))
     }
 
     private func bounded(_ point: CGPoint) -> CGPoint {
@@ -606,7 +719,7 @@ final class HandControlEngine: ObservableObject {
             case .pinch: feedback = .pinching
             case .scroll: feedback = settings.scrollEnabled ? .scrolling : .idle
             case .missionControl: feedback = .missionControl
-            case .zoom: feedback = .zoom
+            case .zoom: feedback = zoomFeedback
             case .none: feedback = .idle
             }
         }
@@ -614,9 +727,11 @@ final class HandControlEngine: ObservableObject {
     }
 
     private func resetInteraction() {
-        let interruptedPinch = pinch.isActive || twoHandZoom.isCaptured
+        let interruptedPinch = pinch.isActive || pinchTracking?.contact != nil || twoHandZoom.isCaptured
         mouse.reset()
         pinch.cancel()
+        lastAim = nil
+        pinchTracking = nil
         twoHandZoom = TwoHandZoom()
         stillness = PointerStillness()
         indexAnchor = IndexAnchor()

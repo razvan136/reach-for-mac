@@ -1,6 +1,6 @@
 import Foundation
 
-/// Keeps index-finger aim fixed during the brief movement into a pinch.
+/// Detects index-finger curl as the thumb and index finger close into a pinch.
 struct PinchAimLock {
     private var recent: [(evidence: PinchGeometry.AimEvidence, time: TimeInterval)] = []
     private var lastClosingAt: TimeInterval?

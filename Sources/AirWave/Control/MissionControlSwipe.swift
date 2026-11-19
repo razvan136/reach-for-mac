@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 
-/// Recognizes one sideways swipe while the four-finger pose is held.
+/// Recognizes one downward swipe while the four-finger pose is held.
 struct MissionControlSwipe {
     private var origin: CGPoint?
     private var lastSampleAt: TimeInterval?
@@ -18,10 +18,16 @@ struct MissionControlSwipe {
             return false
         }
 
+        // Camera coordinates increase downward. Raising the hand sets
+        // a fresh starting height for the next downward stroke.
+        if palm.y < origin.y {
+            self.origin = palm
+            return false
+        }
         let threshold = min(0.075, max(0.028, reach * 0.085))
-        let dx = palm.x - origin.x
-        let dy = abs(palm.y - origin.y)
-        guard abs(dx) >= threshold, abs(dx) >= dy * 1.5 else { return false }
+        let dx = abs(palm.x - origin.x)
+        let dy = palm.y - origin.y
+        guard dy >= threshold, dy >= dx * 1.5 else { return false }
         didSwipe = true
         return true
     }

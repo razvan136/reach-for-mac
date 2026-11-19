@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// Resolves a confirmed pinch into a click on release or a held mouse button.
@@ -6,13 +7,16 @@ struct PinchInteraction {
     enum Release: Equatable { case click, endDrag }
 
     private let dragHoldDuration: TimeInterval = 0.32
+    private let movingDragHoldDuration: TimeInterval = 0.16
     private let maxSampleGap: TimeInterval = 0.15
     private var firmHoldDuration: TimeInterval = 0
     private var lastFirmSampleAt: TimeInterval?
+    private var motionStart: (point: CGPoint, time: TimeInterval)?
+    private var lastMotionPoint: CGPoint?
     private(set) var isActive = false
     private(set) var isDragging = false
 
-    mutating func update(at time: TimeInterval, firmlyClosed: Bool) -> Update {
+    mutating func update(at time: TimeInterval, firmlyClosed: Bool, handPoint: CGPoint? = nil) -> Update {
         if isDragging { return .drag }
         isActive = true
 
@@ -25,16 +29,44 @@ struct PinchInteraction {
         }
         if let previous = lastFirmSampleAt {
             let elapsed = time - previous
-            if elapsed > 0, elapsed <= maxSampleGap { firmHoldDuration += elapsed }
+            guard elapsed > 0 else { return .waiting }
+            if elapsed <= maxSampleGap {
+                firmHoldDuration += elapsed
+            } else {
+                pauseHold()
+            }
         }
         lastFirmSampleAt = time
-        guard firmHoldDuration >= dragHoldDuration else { return .waiting }
+        let movingDrag = handPoint.map { confirmsMovement($0, at: time) } ?? false
+        guard firmHoldDuration >= dragHoldDuration || movingDrag else { return .waiting }
         isDragging = true
         return .beginDrag
     }
 
     mutating func pauseHold() {
         lastFirmSampleAt = nil
+        motionStart = nil
+        lastMotionPoint = nil
+    }
+
+    private mutating func confirmsMovement(_ point: CGPoint, at time: TimeInterval) -> Bool {
+        defer { lastMotionPoint = point }
+        guard let start = motionStart, let previous = lastMotionPoint else {
+            motionStart = (point, time)
+            return false
+        }
+        guard time - start.time >= movingDragHoldDuration else { return false }
+
+        // Require two displaced observations in the same direction, so a single
+        // landmark jump or small tremor can't turn a click into a drag.
+        let dx = point.x - start.point.x
+        let dy = point.y - start.point.y
+        let priorX = previous.x - start.point.x
+        let priorY = previous.y - start.point.y
+        let travel = hypot(dx, dy)
+        let priorTravel = hypot(priorX, priorY)
+        return travel >= 18 && priorTravel >= 9 &&
+            dx * priorX + dy * priorY >= 0.85 * travel * priorTravel
     }
 
     mutating func release() -> Release? {

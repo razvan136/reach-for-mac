@@ -25,6 +25,7 @@ enum SelfTest {
         testPinchEvidence()
         testPinchAimLock()
         testPinchActions()
+        testMovingPinch()
         testTwoHandZoom()
         testDragRelease()
         testTrackingContinuity()
@@ -81,8 +82,8 @@ enum SelfTest {
         _ = quick.processed(Fixture.palm())
         check("an isolated apparent contact after an open hand cannot start a pinch",
               quick.processed(Fixture.pinching()) == nil)
-        check("the first contact frame can freeze aim while the click is still unconfirmed",
-              quick.isConfirmingPinch)
+        check("first contact exposes the palm and can anchor aim before a click is eligible",
+              quick.isConfirmingPinch && quick.pendingPinch?.isFirmPinch == true)
         check("two frames of clear contact after an open hand start a pinch",
               quick.processed(Fixture.pinching())?.gesture == .pinch && !quick.isConfirmingPinch)
     }
@@ -176,7 +177,12 @@ enum SelfTest {
 
         let mapper = PointerMapper(calibration: AimPoint.indexFinger.defaultCalibration)
         let display = CGRect(x: 0, y: 0, width: 1440, height: 900)
-        let target = mapper.map(translated.aimTip ?? .zero, onto: display, timestamp: 1.0 / 30)
+        let index = translated.aimTip ?? .zero
+        let palm = moved?.palmCenter ?? .zero
+        let target = mapper.map(index, onto: display, timestamp: 1.0 / 30)
+        let approachReference = PinchTracking.Reference(pointer: target, hand: target)
+        let tracking = PinchTracking(aim: .init(point: index, palm: palm, time: 1.0 / 30),
+                                     approach: approachReference)
         var motion = PointerMotion()
         motion.place(at: target)
         var heldBeforeContact = true
@@ -188,8 +194,10 @@ enum SelfTest {
             let sample = recognizer.processed(frame)
             let holds = lock.shouldHold(sample?.pinchAimEvidence, at: time)
             heldBeforeContact = heldBeforeContact && holds && sample?.gesture == .aim
-            if holds {
-                motion.freeze()
+            if holds, let sample {
+                let aim = tracking.aim(following: sample.palmCenter)
+                let projected = mapper.project(aim, onto: display, speed: 1)
+                motion.aim(at: tracking.approach.position(following: projected), time: time)
             } else if let tip = sample?.indexTip {
                 motion.aim(at: mapper.map(tip, onto: display, timestamp: time), time: time)
             }
@@ -197,6 +205,19 @@ enum SelfTest {
         }
         check("curling the index toward the thumb holds the displayed target before contact",
               heldBeforeContact && motion.position == target)
+
+        let closingWhileMoving = recognizer.processed(translate(approach[2]))
+        if let closingWhileMoving {
+            let aim = tracking.aim(following: closingWhileMoving.palmCenter)
+            let projected = mapper.project(aim, onto: display, speed: 1)
+            let movedTarget = tracking.approach.position(following: projected)
+            check("aim follows the moving palm while the index finger curls",
+                  closingWhileMoving.gesture == .aim &&
+                  near(movedTarget.x, target.x + 0.03 * display.width / mapper.calibration.width) &&
+                  near(movedTarget.y, target.y + 0.04 * display.height / mapper.calibration.height))
+        } else {
+            check("aim follows the moving palm while the index finger curls", false)
+        }
 
         var abandoned = lock
         let heldNearby = recognizer.processed(approach[2])
@@ -261,7 +282,7 @@ enum SelfTest {
         check("duplicated observations of a single hand cannot start zoom",
               zoom.update(left, left, at: 0.025) == .idle)
         check("a candidate pair suppresses one-hand actions before zoom begins",
-              zoom.update(left, right, at: 0.05) == .captured && zoom.isCaptured)
+              zoom.update(left, right, at: 0.05) == .confirming && zoom.isCaptured)
         let begin = zoom.update(left, right, at: 0.083)
         check("a confirmed pair can begin with the two pinches nearly touching",
               begin == .began(CGPoint(x: 0.5, y: 0.43)))
@@ -289,15 +310,59 @@ enum SelfTest {
             }
         }
         check("bringing the same pinches together reverses zoom", inward < -0.25)
-        check("a brief occlusion holds the current zoom", zoom.update(left, nil, at: seconds + 0.035) == .captured)
+        check("a brief occlusion holds the current zoom", zoom.update(left, nil, at: seconds + 0.035) == .paused)
         check("a returning hand does not deliver a large catch-up zoom",
-              zoom.update(left, right, at: seconds + 0.13) == .captured)
+              zoom.update(left, right, at: seconds + 0.142) == .ready)
         check("opening either pinch ends magnification immediately",
-              zoom.update(leftOpen, right, at: seconds + 0.16) == .ended)
+              zoom.update(leftOpen, right, at: seconds + 0.18) == .ended)
         check("the remaining pinch is suppressed until it opens",
-              zoom.update(leftOpen, right, at: seconds + 0.20) == .captured)
+              zoom.update(leftOpen, right, at: seconds + 0.22) == .releasing)
         check("opening both hands restores single-hand control",
-              zoom.update(leftOpen, rightOpen, at: seconds + 0.23) == .released && !zoom.isCaptured)
+              zoom.update(leftOpen, rightOpen, at: seconds + 0.25) == .released && !zoom.isCaptured)
+
+        var softLeft = left
+        var softRight = right
+        softLeft.thumbIndexConfidence = 0.36
+        softRight.thumbIndexConfidence = 0.38
+        check("two distinct near-touching grips can prime zoom with lower landmark confidence",
+              zoom.update(softLeft, softRight, at: 2) == .confirming)
+        check("an obscured hand during confirmation does not lock out the pair",
+              zoom.update(softLeft, nil, at: 2.04) == .confirming)
+        var hiddenThumb = grip(x: 0.34, angle: 0.72)
+        hiddenThumb.points.removeValue(forKey: .thumbTip)
+        let expandedRight = grip(x: 0.66, angle: -0.72)
+        check("both visible palms can confirm after one grip's fingertips are briefly hidden",
+              zoom.update(hiddenThumb, expandedRight, at: 2.08) == .began(CGPoint(x: 0.5, y: 0.43)))
+        if case .changed(let amount) = zoom.update(hiddenThumb, expandedRight, at: 2.12) {
+            check("outward travel during confirmation still zooms in", amount > 0)
+        } else {
+            check("outward travel during confirmation still zooms in", false)
+        }
+
+        zoom = TwoHandZoom()
+        _ = zoom.update(left, right, at: 3)
+        _ = zoom.update(left, right, at: 3.13)
+        var sparseChanges = 0
+        for index in 1...7 {
+            let spread = Double(index) * 0.02
+            var a = grip(x: 0.49 - spread, angle: 0.72)
+            var b = grip(x: 0.51 + spread, angle: -0.72)
+            if index.isMultiple(of: 2) {
+                a.points.removeValue(forKey: .thumbTip)
+            } else {
+                b.points.removeValue(forKey: .indexTip)
+            }
+            if case .changed(let amount) = zoom.update(b, a, at: 3.13 + Double(index) * 0.13), amount > 0 {
+                sparseChanges += 1
+            }
+        }
+        check("alternating fingertip loss and slower camera frames still produce sustained zoom", sparseChanges >= 6)
+        let gap = grip(x: 0.35, angle: 0.72, gap: 0.29)
+        let farRight = grip(x: 0.65, angle: -0.72)
+        check("a single small apparent opening pauses without ending the zoom",
+              zoom.update(gap, farRight, at: 4.08) == .paused)
+        check("a confirmed opening ends the zoom",
+              zoom.update(gap, farRight, at: 4.12) == .ended)
     }
 
     private static func testPinchActions() {
@@ -347,6 +412,60 @@ enum SelfTest {
         _ = pinch.update(at: 4.67, firmlyClosed: true)
         pinch.cancel()
         check("canceling clears a drag", !pinch.isActive && !pinch.isDragging)
+    }
+
+    private static func testMovingPinch() {
+        func point(_ x: CGFloat, _ y: CGFloat = 200) -> CGPoint { CGPoint(x: 300 + x, y: y) }
+
+        var quick = PinchInteraction()
+        let quickUpdates = (0...4).map { frame in
+            quick.update(at: Double(frame) / 30, firmlyClosed: true, handPoint: point(CGFloat(frame) * 10))
+        }
+        check("a quick moving pinch still clicks once on release",
+              quickUpdates.allSatisfy { $0 == .waiting } && quick.release() == .click && quick.release() == nil)
+
+        var moving = PinchInteraction()
+        let movingUpdates = (0...5).map { frame in
+            moving.update(at: Double(frame) / 30, firmlyClosed: true, handPoint: point(CGFloat(frame) * 5))
+        }
+        check("sustained travel starts a firm drag after five 30 fps intervals",
+              Array(movingUpdates.prefix(5)) == Array(repeating: .waiting, count: 5) &&
+              movingUpdates.last == .beginDrag)
+        check("continued movement keeps one drag active until release",
+              moving.update(at: 0.20, firmlyClosed: true, handPoint: point(46)) == .drag &&
+              moving.release() == .endDrag && moving.release() == nil)
+
+        var soft = PinchInteraction()
+        let softUpdates = (0...15).map { frame in
+            soft.update(at: Double(frame) / 30, firmlyClosed: false, handPoint: point(CGFloat(frame) * 6))
+        }
+        check("moving with a soft pinch never presses the drag button",
+              softUpdates.allSatisfy { $0 == .waiting } && soft.release() == .click)
+
+        var shaky = PinchInteraction()
+        let jitter: [CGFloat] = [0, 4, -3, 3, -10, 44, -3]
+        let jitterUpdates = jitter.enumerated().map { frame, dx in
+            shaky.update(at: Double(frame) / 30, firmlyClosed: true, handPoint: point(dx))
+        }
+        check("a single large outlier amid offset reversals cannot accelerate a drag",
+              jitterUpdates.allSatisfy { $0 == .waiting } && shaky.release() == .click)
+
+        var interrupted = PinchInteraction()
+        _ = interrupted.update(at: 0, firmlyClosed: true, handPoint: point(0))
+        _ = interrupted.update(at: 0.13, firmlyClosed: true, handPoint: point(12))
+        interrupted.pauseHold()
+        check("a tracking gap clears fast-drag evidence from previous motion",
+              interrupted.update(at: 0.20, firmlyClosed: true, handPoint: point(62)) == .waiting &&
+              interrupted.update(at: 0.25, firmlyClosed: true, handPoint: point(66)) == .waiting &&
+              interrupted.release() == .click)
+
+        let contact = PinchTracking.Reference(pointer: point(0), hand: point(11))
+        check("a stationary click ignores small palm changes during release",
+              contact.continuation(afterClickAt: point(13)) == point(0))
+        check("a moving click resumes in the direction the palm traveled",
+              contact.continuation(afterClickAt: point(37, 190)) == point(26, 190))
+        check("a large catch-up after a click is bounded from its original target",
+              near(distance(contact.continuation(afterClickAt: point(180, 300)), contact.pointer), 72))
     }
 
     private static func testDragRelease() {
@@ -494,6 +613,11 @@ enum SelfTest {
         check("drag reports movement and releases once at the last position",
               sent.map(\.type) == [.mouseMoved, .leftMouseDown, .leftMouseDragged, .leftMouseUp] &&
               sent.last?.location == destination)
+        check("drag movement carries its signed distance from the prior cursor location",
+              sent.first { $0.type == .leftMouseDragged }.map {
+                  $0.getIntegerValueField(.mouseEventDeltaX) == 100 &&
+                  $0.getIntegerValueField(.mouseEventDeltaY) == 50
+              } == true)
     }
 
     private static func testMagnificationEvents() {
@@ -609,20 +733,21 @@ enum SelfTest {
 
         var swipe = MissionControlSwipe()
         let center = CGPoint(x: 0.5, y: 0.5)
-        check("entering the pose and moving vertically keep Mission Control closed",
+        check("entering the pose, moving sideways, or raising the hand keeps Mission Control closed",
               !swipe.update(center, at: 0, reach: 0.64) &&
-              !swipe.update(CGPoint(x: 0.51, y: 0.62), at: 0.03, reach: 0.64))
-        check("a deliberate sideways swipe requests one open",
-              swipe.update(CGPoint(x: 0.44, y: 0.51), at: 0.06, reach: 0.64) &&
-              !swipe.update(CGPoint(x: 0.3, y: 0.51), at: 0.09, reach: 0.64))
+              !swipe.update(CGPoint(x: 0.61, y: 0.51), at: 0.03, reach: 0.64) &&
+              !swipe.update(CGPoint(x: 0.5, y: 0.43), at: 0.06, reach: 0.64))
+        check("a deliberate downward swipe from the raised height requests one open",
+              swipe.update(CGPoint(x: 0.51, y: 0.49), at: 0.09, reach: 0.64) &&
+              !swipe.update(CGPoint(x: 0.51, y: 0.64), at: 0.12, reach: 0.64))
         check("a held pose does not reopen Mission Control after returning to center",
-              !swipe.update(center, at: 0.12, reach: 0.64) &&
-              !swipe.update(CGPoint(x: 0.61, y: 0.49), at: 0.45, reach: 0.64))
+              !swipe.update(center, at: 0.15, reach: 0.64) &&
+              !swipe.update(CGPoint(x: 0.51, y: 0.61), at: 0.45, reach: 0.64))
         swipe = MissionControlSwipe()
         _ = swipe.update(center, at: 1, reach: 0.64)
         check("regaining tracking after a gap starts a fresh swipe reference",
-              !swipe.update(CGPoint(x: 0.7, y: 0.5), at: 1.44, reach: 0.64) &&
-              swipe.update(CGPoint(x: 0.77, y: 0.5), at: 1.47, reach: 0.64))
+              !swipe.update(CGPoint(x: 0.5, y: 0.69), at: 1.44, reach: 0.64) &&
+              swipe.update(CGPoint(x: 0.512, y: 0.75), at: 1.47, reach: 0.64))
     }
 
     private static func testCursorBadges() {
@@ -632,6 +757,11 @@ enum SelfTest {
         check("drag and vertical scroll keep their labels",
               PointerFeedback.dragging.badge == "Drag" && PointerFeedback.scrolling.badge == "Scroll" &&
               PointerFeedback.scrollingUp.badge == "Scroll up" && PointerFeedback.scrollingDown.badge == "Scroll down")
+        check("zoom feedback distinguishes preparing, moving, reacquiring, and release",
+              PointerFeedback.confirmingZoom.badge == "Pinch both hands" &&
+              PointerFeedback.zoom.badge == "Move hands to zoom" &&
+              PointerFeedback.trackingZoom.badge == "Finding both hands" &&
+              PointerFeedback.releasingZoom.badge == "Open both hands")
     }
 
     private static func testScrollMotion() {

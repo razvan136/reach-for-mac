@@ -16,7 +16,9 @@ final class SystemInput {
     func move(to point: CGPoint) {
         guard position != point else { return }
         if dragging {
-            guard let event = button(.leftMouseDragged, at: point) else { return }
+            guard let previous = position, let event = button(.leftMouseDragged, at: point) else { return }
+            event.setIntegerValueField(.mouseEventDeltaX, value: Int64((point.x - previous.x).rounded()))
+            event.setIntegerValueField(.mouseEventDeltaY, value: Int64((point.y - previous.y).rounded()))
             position = point
             deliver(event)
         } else {

@@ -58,7 +58,15 @@ final class PointerMapper {
     func map(_ handPoint: CGPoint, onto display: CGRect, timestamp: TimeInterval, speed: Double = 1.0) -> CGPoint {
         let normalized = calibration.normalized(handPoint)
         let smoothed = filter.filter(normalized, at: timestamp)
+        return screenPoint(smoothed, onto: display, speed: speed)
+    }
 
+    /// Projects movement without filter lag for pinch intent and grip references.
+    func project(_ handPoint: CGPoint, onto display: CGRect, speed: Double) -> CGPoint {
+        screenPoint(calibration.normalized(handPoint), onto: display, speed: speed)
+    }
+
+    private func screenPoint(_ normalized: CGPoint, onto display: CGRect, speed: Double) -> CGPoint {
         // Preserve full reach without a sharp rise in sensitivity at the edges.
         let gain = min(max(speed, 0.01), 2)
         func shape(_ value: CGFloat) -> CGFloat {
@@ -68,8 +76,8 @@ final class PointerMapper {
         }
 
         return CGPoint(
-            x: display.minX + shape(smoothed.x) * display.width,
-            y: display.minY + shape(smoothed.y) * display.height
+            x: display.minX + shape(normalized.x) * display.width,
+            y: display.minY + shape(normalized.y) * display.height
         )
     }
 

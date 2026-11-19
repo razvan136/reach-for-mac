@@ -4,86 +4,148 @@ import Foundation
 /// Owns both pinches through release so lifting either hand cannot become a click.
 struct TwoHandZoom {
     enum Update: Equatable {
-        case idle, captured, began(CGPoint), changed(Double), ended, released
+        case idle, confirming, began(CGPoint), ready, changed(Double), paused, ended, releasing, released
     }
 
     private struct Grip {
-        enum Contact { case closed, open, uncertain }
+        enum Contact { case closed, open, wideOpen, uncertain }
 
-        let thumbAndIndex: CGPoint
+        let palm: CGPoint
         let wrist: CGPoint
         let scale: CGFloat
+        let pinchPoint: CGPoint?
         let canStart: Bool
         let contact: Contact
 
         init?(_ hand: HandFrame) {
             var anchor = PalmAnchor()
-            guard let wrist = hand.wrist, let palm = anchor.measure(hand),
-                  let thumb = hand.thumbTip, let index = hand.indexTip,
-                  let pinch = PinchGeometry(frame: hand, scale: palm.scale) else { return nil }
+            guard let wrist = hand.wrist, let palm = anchor.measure(hand) else { return nil }
+            self.palm = palm.center
             self.wrist = hand.metric(wrist)
             scale = palm.scale
-            thumbAndIndex = interpolate(thumb, index, 0.5)
-            canStart = pinch.canStart
-            if pinch.hasReliableTips, pinch.gap >= 0.26 || pinch.looksRelaxed {
-                contact = .open
-            } else if pinch.hasReliableTips, pinch.gap <= 0.235, pinch.retainsContactShape {
-                contact = .closed
+            if let thumb = hand.thumbTip, let index = hand.indexTip {
+                pinchPoint = interpolate(thumb, index, 0.5)
             } else {
-                contact = .uncertain
+                pinchPoint = nil
             }
+            guard let pinch = PinchGeometry(frame: hand, scale: palm.scale), pinch.hasReliableTips else {
+                canStart = false
+                contact = .uncertain
+                return
+            }
+            // Two distinct pinches can use a little more tolerance than a click.
+            // Nearly coincident tips still count when Vision misses a finger joint.
+            let touching = pinch.retainsContactShape || (!pinch.hasAlignment && pinch.gap <= 0.075)
+            if pinch.gap >= 0.37 {
+                contact = .wideOpen
+            } else if pinch.gap >= 0.27 || pinch.looksRelaxed {
+                contact = .open
+            } else {
+                contact = touching && pinch.gap <= 0.24 ? .closed : .uncertain
+            }
+            canStart = contact == .closed && pinch.gap <= 0.20
         }
     }
 
     private struct Pair {
-        let midpoint: CGPoint
-        let span: CGFloat
-        let minimumSpan: CGFloat
+        let first: Grip
+        let second: Grip
+        let aspect: CGFloat
 
-        init?(_ first: Grip?, _ second: Grip?, frame: HandFrame?) {
-            guard let first, let second, let frame,
-                  distance(first.wrist, second.wrist) > min(first.scale, second.scale) * 0.45 else { return nil }
-            midpoint = interpolate(first.thumbAndIndex, second.thumbAndIndex, 0.5)
-            span = distance(frame.metric(first.thumbAndIndex), frame.metric(second.thumbAndIndex))
-            minimumSpan = max(0.035, (first.scale + second.scale) * 0.25)
+        var canStart: Bool { first.canStart && second.canStart }
+        var midpoint: CGPoint {
+            interpolate(first.pinchPoint ?? first.palm, second.pinchPoint ?? second.palm, 0.5)
+        }
+        var minimumSpan: CGFloat { max(0.035, (first.scale + second.scale) * 0.25) }
+
+        init?(_ first: Grip?, _ second: Grip?, aspect: CGFloat) {
+            guard let first, let second,
+                  distance(first.wrist, second.wrist) > min(first.scale, second.scale) * 0.32 else { return nil }
+            self.init(first: first, second: second, aspect: aspect)
+        }
+
+        private init(first: Grip, second: Grip, aspect: CGFloat) {
+            self.first = first
+            self.second = second
+            self.aspect = aspect
+        }
+
+        func aligned(to previous: Pair) -> Pair {
+            let direct = distance(first.wrist, previous.first.wrist) + distance(second.wrist, previous.second.wrist)
+            let reversed = distance(first.wrist, previous.second.wrist) + distance(second.wrist, previous.first.wrist)
+            return direct <= reversed ? self : Pair(first: second, second: first, aspect: aspect)
         }
     }
 
     private struct Motion {
         private let gain = 0.8
-        let minimumSpan: CGFloat
-        var lastSampleAt: TimeInterval
-        var filtered: Double
-        var sent: Double
+        private let minimumSpan: CGFloat
+        private let firstOffset: CGPoint
+        private let secondOffset: CGPoint
+        private var previous: Pair
+        private var lastSampleAt: TimeInterval
+        private var firstClosedAt: TimeInterval
+        private var secondClosedAt: TimeInterval
+        private var filtered: Double
+        private var sent: Double
+        private var missedPair = false
+        var sawOpening = false
 
         init(pair: Pair, time: TimeInterval) {
+            let first = pair.first.pinchPoint ?? pair.first.palm
+            let second = pair.second.pinchPoint ?? pair.second.palm
+            firstOffset = CGPoint(x: first.x - pair.first.palm.x, y: first.y - pair.first.palm.y)
+            secondOffset = CGPoint(x: second.x - pair.second.palm.x, y: second.y - pair.second.palm.y)
             minimumSpan = pair.minimumSpan
+            previous = pair
             lastSampleAt = time
-            filtered = log(hypot(pair.span, minimumSpan))
+            firstClosedAt = time
+            secondClosedAt = time
+            filtered = Self.logSpan(x: (first.x - second.x) * pair.aspect,
+                                    y: first.y - second.y, minimum: minimumSpan)
             sent = filtered
         }
 
-        mutating func update(span: CGFloat, at time: TimeInterval) -> Double? {
-            let sample = log(hypot(span, minimumSpan))
+        mutating func update(_ pair: Pair?, at time: TimeInterval) -> Update {
             let elapsed = time - lastSampleAt
-            guard elapsed > 0 else { return nil }
+            guard elapsed > 0 else { return .ready }
+            guard let pair else {
+                missedPair = true
+                return elapsed <= 0.26 ? .paused : .ended
+            }
+
+            let aligned = pair.aligned(to: previous)
+            if aligned.first.contact == .closed { firstClosedAt = time }
+            if aligned.second.contact == .closed { secondClosedAt = time }
+            guard time - firstClosedAt <= 0.40, time - secondClosedAt <= 0.40 else { return .ended }
+            previous = aligned
             lastSampleAt = time
-            if elapsed > 0.10 {
-                // Resume at the observed distance after occlusion without a catch-up zoom.
+
+            // Keep each starting pinch point attached to its palm. Tip jitter
+            // and brief finger occlusion don't interrupt movement or change span.
+            let dx = (aligned.first.palm.x + firstOffset.x) - (aligned.second.palm.x + secondOffset.x)
+            let dy = (aligned.first.palm.y + firstOffset.y) - (aligned.second.palm.y + secondOffset.y)
+            let sample = Self.logSpan(x: dx * aligned.aspect, y: dy, minimum: minimumSpan)
+            defer { missedPair = false }
+            if missedPair && elapsed > 0.13 {
                 filtered = sample
                 sent = sample
-                return nil
+                return .ready
             }
-            filtered += (sample - filtered) * (1 - exp(-elapsed / 0.055))
+            filtered += (sample - filtered) * (1 - exp(-elapsed / 0.045))
             let remaining = (filtered - sent) * gain
-            guard abs(remaining) >= 0.012 else { return nil }
+            guard abs(remaining) >= 0.008 else { return .ready }
             let change = min(max(remaining, -0.09), 0.09)
             sent += change / gain
-            return expm1(change)
+            return .changed(expm1(change))
+        }
+
+        private static func logSpan(x: CGFloat, y: CGFloat, minimum: CGFloat) -> Double {
+            0.5 * log(x * x + y * y + minimum * minimum)
         }
     }
 
-    private enum State { case idle, confirming(TimeInterval), active(Motion), releasing }
+    private enum State { case idle, confirming(Pair, TimeInterval), active(Motion), releasing }
     private var state = State.idle
 
     var isCaptured: Bool {
@@ -95,40 +157,45 @@ struct TwoHandZoom {
         if secondHand == nil, !isCaptured { return .idle }
         let first = firstHand.flatMap(Grip.init)
         let second = secondHand.flatMap(Grip.init)
-        let pair = Pair(first, second, frame: firstHand)
-        let canStart = pair != nil && first?.canStart == true && second?.canStart == true
+        let pair = Pair(first, second, aspect: firstHand?.aspectRatio ?? 1)
+        let opening = first?.contact == .open || second?.contact == .open
+        let wideOpen = first?.contact == .wideOpen || second?.contact == .wideOpen
 
         switch state {
         case .idle:
-            guard canStart else { return .idle }
-            state = .confirming(time)
-            return .captured
-        case .confirming(let previous):
-            guard canStart, let pair else {
-                state = .releasing
-                return .captured
+            guard let pair, pair.canStart else { return .idle }
+            state = .confirming(pair, time)
+            return .confirming
+        case .confirming(let start, let previous):
+            if pair != nil, !opening, !wideOpen, (first?.contact == .closed || second?.contact == .closed),
+               time > previous, time - previous <= 0.20 {
+                state = .active(Motion(pair: start, time: time))
+                return .began(start.midpoint)
             }
-            guard time > previous, time - previous <= 0.15 else {
-                state = .confirming(time)
-                return .captured
+            if let pair, pair.canStart, time - previous > 0.20 {
+                state = .confirming(pair, time)
+                return .confirming
             }
-            state = .active(Motion(pair: pair, time: time))
-            return .began(pair.midpoint)
-        case .active(var motion):
-            if first?.contact == .open || second?.contact == .open || time - motion.lastSampleAt > 0.18 {
-                state = .releasing
-                return .ended
-            }
-            guard let pair, first?.contact == .closed, second?.contact == .closed else { return .captured }
-            let amount = motion.update(span: pair.span, at: time)
-            state = .active(motion)
-            return amount.map(Update.changed) ?? .captured
-        case .releasing:
-            if (firstHand == nil || first?.contact == .open), (secondHand == nil || second?.contact == .open) {
+            if wideOpen || time - previous > 0.20 {
                 state = .idle
                 return .released
             }
-            return .captured
+            return .confirming
+        case .active(var motion):
+            if wideOpen || (opening && motion.sawOpening) {
+                state = .releasing
+                return .ended
+            }
+            motion.sawOpening = opening
+            let update = opening ? .paused : motion.update(pair, at: time)
+            state = update == .ended ? .releasing : .active(motion)
+            return update
+        case .releasing:
+            if first?.contact != .closed, second?.contact != .closed {
+                state = .idle
+                return .released
+            }
+            return .releasing
         }
     }
 }
