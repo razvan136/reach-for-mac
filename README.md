@@ -78,6 +78,10 @@ synthetic hand samples and collect generated input events without posting them.
 slices. The source is in [`Sources/AirWave/`](Sources/AirWave), organized into
 hand tracking, pointer and gesture controls, and the native AppKit interface.
 
+The app icon is editable in [`Resources/AppIcon.icon`](Resources/AppIcon.icon).
+The build uses the included compiled icon catalog, so you can build Reach
+with the Command Line Tools alone.
+
 ## Package a release
 
 For maintainers preparing a public Mac download, install a **Developer ID
