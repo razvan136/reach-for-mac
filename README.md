@@ -82,21 +82,3 @@ hand tracking, pointer and gesture controls, and the native AppKit interface.
 The app icon is editable in [`Resources/AppIcon.icon`](Resources/AppIcon.icon).
 The build uses the included compiled icon catalog, so you can build Reach
 with the Command Line Tools alone.
-
-## Package a release
-
-For maintainers preparing a public Mac download, install a **Developer ID
-Application** signing identity with its private key. Create a notarization
-profile in your Keychain, then build the distribution ZIP.
-
-```sh
-xcrun notarytool store-credentials reach-notary --apple-id 'APPLE_ACCOUNT_EMAIL' --team-id 'TEAM_ID'
-./release.sh reach-notary
-```
-
-The release script builds both architectures, signs the app with the hardened
-runtime, submits it to Apple, staples the approved ticket, and verifies the
-extracted download. The finished file is
-`build/release/Reach-for-Mac-<version>.zip`. Set `CODESIGN_IDENTITY` to the full
-certificate name if your Keychain contains multiple Developer ID Application
-identities. [Apple’s distribution guide](https://developer.apple.com/documentation/xcode/packaging-mac-software-for-distribution)
