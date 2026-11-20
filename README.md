@@ -1,6 +1,10 @@
-<h1 align="center">
-  <img src="Resources/READMEHeader.png" alt="Reach for Mac — by razvan136">
-</h1>
+<div align="center">
+
+# <img src="Resources/READMEIcon.png" width="48" height="48" align="absmiddle" alt=""> Reach for Mac
+
+— by [razvan136](https://github.com/razvan136)
+
+</div>
 
 Move the macOS pointer with your hand and your camera. Reach lives in the menu
 bar and lets you aim, click, drag, scroll, and open Mission Control. The pointer
@@ -57,6 +61,11 @@ calibrating. Reach saves calibration separately for each camera and aiming mode.
 Open **Settings** to aim with your palm, adjust cursor, drag, and scroll speeds,
 or increase **Smoothing** for a steadier pointer. Select the number beside a
 speed slider to type an exact value.
+
+Reach sends mouse and trackpad-style input. macOS 27 lets apps receive direct
+touches through AppKit. To generate system-wide touch input from a camera, Reach
+would need an Apple-authorized virtual HID device and macOS would need to
+recognize it as a touchscreen.
 
 ## Troubleshooting
 
