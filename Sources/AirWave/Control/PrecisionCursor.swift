@@ -43,11 +43,11 @@ struct PrecisionCursor {
             self.resumePoint = nil
             return resumePoint.point
         }
-        let x = horizontalRecovery?.map(raw.x)
-        let y = verticalRecovery?.map(raw.y)
-        if x == nil { horizontalRecovery = nil }
-        if y == nil { verticalRecovery = nil }
-        return track(CGPoint(x: x ?? raw.x, y: y ?? raw.y))
+        let x = horizontalRecovery?.map(raw.x) ?? raw.x
+        let y = verticalRecovery?.map(raw.y) ?? raw.y
+        if x == raw.x { horizontalRecovery = nil }
+        if y == raw.y { verticalRecovery = nil }
+        return track(CGPoint(x: x, y: y))
     }
 
     private mutating func track(_ target: CGPoint) -> CGPoint {
@@ -68,27 +68,31 @@ struct PrecisionCursor {
     }
 
     private struct RecoveryAxis {
-        let offset: CGFloat
-        let hand: CGFloat
-        let span: CGFloat
-        let bounds: ClosedRange<CGFloat>
+        private var offset: CGFloat
+        private var movementReference: CGFloat
+        private let correctionRate: CGFloat
+        private let bounds: ClosedRange<CGFloat>
 
         init(cursor: CGFloat, hand: CGFloat, bounds: ClosedRange<CGFloat>) {
             offset = cursor - hand
-            self.hand = hand
+            movementReference = hand
+            correctionRate = min(0.5, abs(offset) / 140)
             self.bounds = bounds
-            // Keeps the correction slower than intentional hand travel, including near screen edges.
-            span = max(140, 2 * abs(offset))
         }
 
-        func map(_ value: CGFloat) -> CGFloat? {
-            let progress = abs(value - hand) / span
-            guard progress < 1 else { return nil }
-            // At the edge in the direction of the offset, both mappings are already clipped to the same point.
-            if (offset < 0 && value <= bounds.lowerBound) || (offset > 0 && value >= bounds.upperBound) {
-                return nil
-            }
-            return min(max(value + offset * (1 - progress), bounds.lowerBound), bounds.upperBound)
+        mutating func map(_ value: CGFloat) -> CGFloat {
+            // Credit intentional travel in either direction without letting idle jitter erase the offset.
+            let previousReference = movementReference
+            let jitterAllowance: CGFloat = 3
+            movementReference = min(max(movementReference, value - jitterAllowance), value + jitterAllowance)
+            let correction = min(abs(offset), abs(movementReference - previousReference) * correctionRate)
+            offset += offset < 0 ? correction : -correction
+
+            let target = value + offset
+            let clamped = min(max(target, bounds.lowerBound), bounds.upperBound)
+            // Discard travel beyond the display edge so the next reversal moves the cursor immediately.
+            if clamped != target { offset = clamped - value }
+            return clamped
         }
     }
 }

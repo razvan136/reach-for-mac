@@ -991,6 +991,38 @@ enum SelfTest {
         let leftEdge = cursor.update(raw: CGPoint(x: 0, y: 400))
         check("moving back across the display restores reach to both edges",
               leftEdge.x == 0 && cursor.update(raw: CGPoint(x: 999, y: 400)).x == 999)
+
+        let cornerDrop = CGPoint(x: 900, y: 100)
+        let handAtDrop = CGPoint(x: 300, y: 700)
+        var recoveredEveryTime = true
+        for _ in 0..<120 {
+            cursor.resumeAiming(from: cornerDrop, within: display)
+            _ = cursor.update(raw: handAtDrop)
+            _ = cursor.update(raw: CGPoint(x: 800, y: 200))
+            let atEdges = cursor.update(raw: CGPoint(x: 850, y: 150))
+            let reversed = cursor.update(raw: CGPoint(x: 840, y: 160))
+            let returned = cursor.update(raw: handAtDrop)
+            recoveredEveryTime = recoveredEveryTime && atEdges == CGPoint(x: 999, y: 0)
+                && reversed.x < atEdges.x && reversed.y > atEdges.y && returned == handAtDrop
+        }
+        check("repeated interactions leave both edges as soon as the hand reverses", recoveredEveryTime)
+
+        cursor.resumeAiming(from: cornerDrop, within: display)
+        _ = cursor.update(raw: handAtDrop)
+        for _ in 0..<120 {
+            _ = cursor.update(raw: CGPoint(x: 302, y: 698))
+            _ = cursor.update(raw: CGPoint(x: 298, y: 702))
+        }
+        check("stationary hand jitter does not erode the recovery reference",
+              cursor.update(raw: handAtDrop) == cornerDrop)
+
+        let shortSweep = CGPoint(x: 560, y: 440)
+        for _ in 0..<5 {
+            _ = cursor.update(raw: shortSweep)
+            _ = cursor.update(raw: handAtDrop)
+        }
+        check("repeated partial sweeps restore calibrated aiming after a large offset",
+              cursor.update(raw: shortSweep) == shortSweep)
     }
 
     private static func testPointerMotion() {
